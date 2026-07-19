@@ -231,37 +231,43 @@ function RecipeForm({initial,onBack,onSave,onSaveLabel='Guardar'}){
   const fileRef=useRef()
   const upd=(k,v)=>setF(p=>({...p,[k]:v}))
   const tog=(k,v)=>setF(p=>({...p,[k]:p[k].includes(v)?p[k].filter(x=>x!==v):[...p[k],v]}))
-  const compressImage=async(file)=>{
-    return new Promise((resolve)=>{
-      const img=new Image();const url=URL.createObjectURL(file);
-      img.onload=()=>{
-        const canvas=document.createElement('canvas');
-        const MAX=1200;let w=img.width,h=img.height;
-        if(w>MAX){h=Math.round(h*MAX/w);w=MAX;}
-        if(h>MAX){w=Math.round(w*MAX/h);h=MAX;}
-        canvas.width=w;canvas.height=h;
-        canvas.getContext('2d').drawImage(img,0,0,w,h);
-        URL.revokeObjectURL(url);
-        resolve(canvas.toDataURL('image/jpeg',0.7).split(',')[1]);
-      };img.src=url;
-    });
-  }
   const handlePhotoExtract=async(ev)=>{
     const file=ev.target.files?.[0];if(!file)return
     setPhotoFile(file);setPhotoPreview(URL.createObjectURL(file))
     setFlow('ext');setErr('')
     try{
-      const b64=await compressImage(file)
+      const b64=await new Promise((resolve,reject)=>{
+        const reader=new FileReader()
+        reader.onload=(e)=>{
+          const img=new Image()
+          img.onload=()=>{
+            try{
+              const canvas=document.createElement('canvas')
+              let w=img.width,h=img.height,MAX=900
+              if(w>h){if(w>MAX){h=Math.round(h*MAX/w);w=MAX}}else{if(h>MAX){w=Math.round(w*MAX/h);h=MAX}}
+              canvas.width=w;canvas.height=h
+              const ctx=canvas.getContext('2d')
+              if(!ctx)throw new Error('Canvas no soportado')
+              ctx.drawImage(img,0,0,w,h)
+              resolve(canvas.toDataURL('image/jpeg',0.65).split(',')[1])
+            }catch(err){reject(err)}
+          }
+          img.onerror=()=>reject(new Error('Error cargando imagen'))
+          img.src=e.target.result
+        }
+        reader.onerror=()=>reject(new Error('Error leyendo archivo'))
+        reader.readAsDataURL(file)
+      })
       const res=await fetch('https://bhhrxotdiwdtltyitnyk.supabase.co/functions/v1/extract-recipe',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({image:b64,mimeType:'image/jpeg'})
       })
-      if(!res.ok)throw new Error(await res.text())
+      if(!res.ok)throw new Error('HTTP '+res.status+': '+await res.text())
       const p=await res.json()
       if(p.error)throw new Error(p.error)
       setF(prev=>({...prev,...p,photo_url:prev.photo_url,source_type:prev.source_type,audience_tags:['todos'],health_tag:p.health_tag||'balanceado',moment_tags:p.moment_tags||[],category_tags:p.category_tags||[],ingredients:p.ingredients?.length?p.ingredients:[{n:'',q:'',u:''}],steps:p.steps?.length?p.steps:['']}))
-    }catch(e){setErr('No se extrajo automáticamente. Llénala tú. ('+e.message+')')}
+    }catch(e){setErr('Error al extraer: '+(e.message||'intenta de nuevo'))}
     setFlow('form')
   }}
   const handleManualPhoto=(ev)=>{const file=ev.target.files?.[0];if(!file)return;setPhotoFile(file);setPhotoPreview(URL.createObjectURL(file))}
