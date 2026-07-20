@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { uploadPhoto, fetchRecipes, insertRecipe, updateRecipe, deleteRecipe, updateRating, fetchOrCreateWeeklyMenu, fetchMenuSlots, addMenuSlot, removeMenuSlot, fetchRecentMealHistory } from './supabase.js'
+import { uploadPhoto, fetchRecipes, insertRecipe, updateRecipe, deleteRecipe, updateRating, fetchOrCreateWeeklyMenu, fetchMenuSlots, addMenuSlot, removeMenuSlot, fetchRecentMealHistory, fetchPantryItems, addPantryItem, removePantryItem, clearPantryItems } from './supabase.js'
 import { useRegisterSW } from 'virtual:pwa-register/react'
 
 const C = { bg: '#F5F0E8', surface: '#FFFDF9', border: '#E8DED0', green: '#4A7C59', greenBg: '#EDF4EF', greenDark: '#2D5238', amber: '#B8763A', amberBg: '#FDF4E8', text: '#2C2416', textSec: '#7A6E5F', textMuted: '#B0A090', danger: '#C0392B' }
@@ -131,6 +131,228 @@ function suggestMenuSlots(recipes, history, days, existingSlots) {
   return newSlots
 }
 
+
+// ── SHOPPING & REFRI UTILS ────────────────────────────────────────────────
+
+const SHOPPING_CATEGORIES = [
+  { key: 'Proteínas', icon: '🥩' },
+  { key: 'Frutas y verduras', icon: '🥬' },
+  { key: 'Lácteos', icon: '🥛' },
+  { key: 'Granos y legumbres', icon: '🌾' },
+  { key: 'Despensa', icon: '🫙' },
+  { key: 'Otros', icon: '📦' },
+]
+
+function categorizeIngredient(name) {
+  const n = name.toLowerCase()
+  if (/pollo|res|cerdo|carne|salmón|atún|camarón|pescado|chorizo|jamón|pavo|huevo|tocino|filete|lomo|pulpo|callo/.test(n)) return 'Proteínas'
+  if (/leche|queso|crema|yogurt|mantequilla|nata/.test(n)) return 'Lácteos'
+  if (/cebolla|ajo|tomate|jitomate|chile|pimiento|zanahoria|calabaza|espinaca|lechuga|brócoli|coliflor|pepino|aguacate|limón|naranja|mango|manzana|cilantro|perejil|apio|betabel|chayote|nopal|ejote|champiñón|hongo|papa|camote|poro/.test(n)) return 'Frutas y verduras'
+  if (/arroz|pasta|harina|pan|tortilla|frijol|lenteja|garbanzo|avena|maíz|trigo|quinoa/.test(n)) return 'Granos y legumbres'
+  if (/aceite|sal|pimienta|comino|orégano|canela|azúcar|vinagre|salsa|mostaza|mayonesa|caldo|consomé|soya|paprika|curry|laurel|tomillo|romero|vainilla/.test(n)) return 'Despensa'
+  return 'Otros'
+}
+
+function consolidateIngredients(recipes) {
+  const map = {}
+  for (const recipe of recipes) {
+    for (const ing of (recipe.ingredients || [])) {
+      const name = (ing.n || ing.name || '').trim()
+      if (!name) continue
+      const key = name.toLowerCase()
+      if (!map[key]) map[key] = { name, q: ing.q || '', u: ing.u || '', category: categorizeIngredient(name) }
+    }
+  }
+  return Object.values(map).sort((a, b) => a.name.localeCompare(b.name, 'es'))
+}
+
+function matchRecipes(recipes, pantryItems) {
+  const norm = s => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim()
+  const pantry = pantryItems.map(p => norm(p.name))
+  const has = name => { const n = norm(name); return pantry.some(p => n.includes(p) || p.includes(n)) }
+  const canMake = [], almostCanMake = []
+  for (const recipe of recipes) {
+    const ings = (recipe.ingredients || []).filter(i => (i.n || i.name || '').trim())
+    if (!ings.length) continue
+    const missing = ings.filter(i => !has(i.n || i.name || ''))
+    if (missing.length === 0) canMake.push({ recipe, missing: [] })
+    else if (missing.length <= 2) almostCanMake.push({ recipe, missing })
+  }
+  canMake.sort((a, b) => (b.recipe.rating || 0) - (a.recipe.rating || 0))
+  almostCanMake.sort((a, b) => a.missing.length - b.missing.length || (b.recipe.rating || 0) - (a.recipe.rating || 0))
+  return { canMake, almostCanMake }
+}
+
+// ── SHOPPING LIST ─────────────────────────────────────────────────────────
+
+function ShoppingListScreen({ weekDays, slots, recipes, onClose }) {
+  const [checked, setChecked] = useState(new Set())
+  const weekStart = weekDays[0], weekEnd = weekDays[6]
+  const weekLabel = `${fmtDate(weekStart, { day: 'numeric', month: 'short' })} – ${fmtDate(weekEnd, { day: 'numeric', month: 'short' })}`
+  const menuRecipes = [...new Set(slots.map(s => s.recipe_id))].map(id => recipes.find(r => r.id === id)).filter(Boolean)
+  const ingredients = consolidateIngredients(menuRecipes)
+  const grouped = {}
+  for (const ing of ingredients) { if (!grouped[ing.category]) grouped[ing.category] = []; grouped[ing.category].push(ing) }
+  const toggle = key => setChecked(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n })
+  const done = checked.size, total = ingredients.length
+
+  return (
+    <div style={{ position: 'absolute', inset: 0, zIndex: 70, background: C.bg, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ padding: '52px 20px 14px', background: C.surface, borderBottom: `0.5px solid ${C.border}`, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.textSec, fontSize: 15, padding: 0 }}>Cerrar</button>
+        <div style={{ textAlign: 'center' }}>
+          <h2 style={{ fontSize: 17, fontWeight: 700, color: C.text, fontFamily: serif, margin: '0 0 2px' }}>Lista del súper</h2>
+          <p style={{ fontSize: 12, color: C.textMuted, margin: 0 }}>{weekLabel} · {done}/{total} listos</p>
+        </div>
+        <div style={{ width: 50 }} />
+      </div>
+      {ingredients.length === 0 ? (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 32, color: C.textMuted }}>
+          <p style={{ fontSize: 48, marginBottom: 16 }}>🛒</p>
+          <p style={{ fontSize: 16, fontWeight: 600, color: C.textSec, fontFamily: serif, marginBottom: 8 }}>Sin ingredientes</p>
+          <p style={{ fontSize: 13, textAlign: 'center' }}>Agrega recetas al planificador para generar la lista</p>
+        </div>
+      ) : (
+        <div style={{ flex: 1, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: '16px 20px 40px' }}>
+          {done > 0 && (
+            <div style={{ background: C.greenBg, borderRadius: 12, padding: '10px 14px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ flex: 1, height: 6, background: C.border, borderRadius: 3, overflow: 'hidden' }}>
+                <div style={{ height: '100%', width: `${(done / total) * 100}%`, background: C.green, borderRadius: 3, transition: 'width 0.3s' }} />
+              </div>
+              <span style={{ fontSize: 12, color: C.greenDark, fontWeight: 600 }}>{done}/{total}</span>
+            </div>
+          )}
+          {SHOPPING_CATEGORIES.filter(cat => grouped[cat.key]).map(cat => (
+            <div key={cat.key} style={{ marginBottom: 22 }}>
+              <p style={{ fontSize: 12, fontWeight: 700, color: C.textMuted, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span>{cat.icon}</span>{cat.key}
+              </p>
+              {grouped[cat.key].map(ing => {
+                const key = ing.name.toLowerCase()
+                const isDone = checked.has(key)
+                return (
+                  <div key={key} onClick={() => toggle(key)} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 0', borderBottom: `0.5px solid ${C.border}`, cursor: 'pointer' }}>
+                    <div style={{ width: 22, height: 22, borderRadius: 6, border: `1.5px solid ${isDone ? C.green : C.border}`, background: isDone ? C.green : 'transparent', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}>
+                      {isDone && <span style={{ color: '#fff', fontSize: 12, fontWeight: 700 }}>✓</span>}
+                    </div>
+                    <span style={{ flex: 1, fontSize: 14, color: isDone ? C.textMuted : C.text, textDecoration: isDone ? 'line-through' : 'none' }}>{ing.name}</span>
+                    {(ing.q || ing.u) && <span style={{ fontSize: 13, color: C.textMuted, flexShrink: 0 }}>{ing.q} {ing.u}</span>}
+                  </div>
+                )
+              })}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── MODO REFRI ────────────────────────────────────────────────────────────
+
+function RefriScreen({ recipes }) {
+  const [items, setItems] = useState([])
+  const [input, setInput] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [results, setResults] = useState(null)
+  const inputRef = useRef()
+
+  useEffect(() => { fetchPantryItems().then(setItems).catch(console.error).finally(() => setLoading(false)) }, [])
+
+  const handleAdd = async (e) => {
+    if (e?.key && e.key !== 'Enter') return
+    const name = input.trim(); if (!name) return
+    try { const saved = await addPantryItem(name); setItems(prev => [saved, ...prev]); setInput(''); setResults(null) } catch (err) { console.error(err) }
+  }
+  const handleRemove = async (id) => {
+    try { await removePantryItem(id); setItems(prev => prev.filter(i => i.id !== id)); setResults(null) } catch (err) { console.error(err) }
+  }
+  const handleClear = async () => {
+    try { await clearPantryItems(); setItems([]); setResults(null) } catch (err) { console.error(err) }
+  }
+
+  return (
+    <div style={S.screen}>
+      <div style={S.header}>
+        <h1 style={{ fontSize: 26, fontWeight: 700, color: C.text, fontFamily: serif, letterSpacing: '-0.3px', marginBottom: 4 }}>Modo Refri</h1>
+        <p style={{ fontSize: 13, color: C.textSec, margin: '0 0 14px', lineHeight: 1.5 }}>Escribe lo que tienes y te digo qué puedes cocinar</p>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input ref={inputRef} style={{ ...S.input, flex: 1 }} type="text" value={input} onChange={e => setInput(e.target.value)} onKeyDown={handleAdd} placeholder="Ej. pollo, cebolla, limón..." />
+          <button onClick={() => handleAdd()} style={{ background: C.green, color: '#fff', border: 'none', borderRadius: 12, padding: '0 20px', fontSize: 22, cursor: 'pointer', flexShrink: 0, fontWeight: 300 }}>+</button>
+        </div>
+      </div>
+      <div style={{ ...S.scroll, padding: '14px 20px', background: C.bg }}>
+        {items.length > 0 && (
+          <div style={{ background: C.surface, borderRadius: 16, border: `0.5px solid ${C.border}`, padding: '14px 16px', marginBottom: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+              <span style={S.sec}>Tengo disponible</span>
+              <button onClick={handleClear} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.danger, fontSize: 12, fontWeight: 600, padding: 0 }}>Limpiar todo</button>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+              {items.map(item => <Pill key={item.id} label={item.name} small bg={C.greenBg} tx={C.greenDark} onX={() => handleRemove(item.id)} />)}
+            </div>
+          </div>
+        )}
+        {items.length > 0 && !results && (
+          <button onClick={() => setResults(matchRecipes(recipes, items))} style={{ ...S.btn(C.green, '#fff'), marginBottom: 20 }}>
+            Buscar recetas
+          </button>
+        )}
+        {!loading && items.length === 0 && !results && (
+          <div style={{ textAlign: 'center', padding: '50px 20px', color: C.textMuted }}>
+            <p style={{ fontSize: 48, marginBottom: 12 }}>🧊</p>
+            <p style={{ fontSize: 16, fontWeight: 600, color: C.textSec, fontFamily: serif, marginBottom: 6 }}>¿Qué tienes en el refri?</p>
+            <p style={{ fontSize: 13, lineHeight: 1.6 }}>Agrega ingredientes arriba y te digo qué puedes cocinar ahora mismo</p>
+          </div>
+        )}
+        {results && (
+          <>
+            <button onClick={() => setResults(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.textSec, fontSize: 13, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 4, padding: 0 }}>
+              <Icon name="back" size={14} color={C.textSec} />Editar ingredientes
+            </button>
+            {results.canMake.length === 0 && results.almostCanMake.length === 0 && (
+              <div style={{ textAlign: 'center', padding: '40px 20px', color: C.textMuted }}>
+                <p style={{ fontSize: 14, marginBottom: 6 }}>No encontré recetas con lo que tienes</p>
+                <p style={{ fontSize: 12 }}>Prueba agregando más ingredientes</p>
+              </div>
+            )}
+            {results.canMake.length > 0 && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <span style={{ fontSize: 15 }}>✅</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: C.greenDark, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Puedes hacer ahora · {results.canMake.length}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 22 }}>
+                  {results.canMake.map(({ recipe }) => <RecipeCard key={recipe.id} r={recipe} onClick={() => {}} />)}
+                </div>
+              </>
+            )}
+            {results.almostCanMake.length > 0 && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                  <span style={{ fontSize: 15 }}>🛒</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: C.amber, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Te falta poco · {results.almostCanMake.length}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 80 }}>
+                  {results.almostCanMake.map(({ recipe, missing }) => (
+                    <div key={recipe.id} style={{ background: C.surface, borderRadius: 16, border: `0.5px solid ${C.border}`, overflow: 'hidden' }}>
+                      <RecipeCard r={recipe} onClick={() => {}} />
+                      <div style={{ padding: '10px 14px', borderTop: `0.5px solid ${C.border}`, background: C.amberBg, display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                        <span style={{ fontSize: 11, color: C.amber, fontWeight: 700 }}>Falta:</span>
+                        {missing.map((ing, i) => <Pill key={i} label={ing.n || ing.name} small bg={C.amberBg} tx={C.amber} />)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── UI PRIMITIVES ─────────────────────────────────────────────────────────
 
 const Pill = ({ label, bg, tx, small, onX }) => (
@@ -158,6 +380,8 @@ const Icon = ({ name, size = 20, color = 'currentColor', style: st }) => (
     {name === 'user' && <><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></>}
     {name === 'calendar' && <><rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" /></>}
     {name === 'share' && <><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><line x1="8.59" y1="13.51" x2="15.42" y2="17.49" /><line x1="15.41" y1="6.51" x2="8.59" y2="10.49" /></>}
+    {name === 'fridge' && <><path d="M5 2h14a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="2" x2="9" y2="9"/><line x1="8" y1="14" x2="10" y2="14"/></>}
+    {name === 'cart' && <><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></>}
   </svg>
 )
 const StarRating = ({ value, onChange, size = 24, gap = 4 }) => (
@@ -298,6 +522,7 @@ function PlannerScreen({ recipes }) {
   const [mealHistory, setMealHistory] = useState([])
   const [showPicker, setShowPicker] = useState(null)
   const [showShare, setShowShare] = useState(false)
+  const [showShopping, setShowShopping] = useState(false)
   const [suggesting, setSuggesting] = useState(false)
   const [loading, setLoading] = useState(true)
 
@@ -461,9 +686,14 @@ function PlannerScreen({ recipes }) {
               )
             })}
             {hasAny && (
-              <button onClick={() => setShowShare(true)} style={{ ...S.btn(C.green, '#fff'), marginTop: 6, marginBottom: 80, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-                <Icon name="share" size={18} color="#fff" />Ver menú completo
-              </button>
+              <div style={{ marginTop: 6, marginBottom: 80, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <button onClick={() => setShowShare(true)} style={{ ...S.btn(C.green, '#fff'), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                  <Icon name="share" size={18} color="#fff" />Ver menú completo
+                </button>
+                <button onClick={() => setShowShopping(true)} style={{ background: C.amberBg, color: C.amber, border: `1px solid ${C.amber}44`, borderRadius: 12, padding: '14px', fontSize: 16, fontWeight: 600, cursor: 'pointer', width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                  🛒 Lista del súper
+                </button>
+              </div>
             )}
           </>
         )}
@@ -471,6 +701,7 @@ function PlannerScreen({ recipes }) {
 
       {showPicker && <RecipePickerModal mealType={showPicker.meal_type} recipes={recipes} onPick={handleAddSlot} onClose={() => setShowPicker(null)} />}
       {showShare && <ShareModal weekDays={weekDays} slots={slots} recipes={recipes} onClose={() => setShowShare(false)} />}
+      {showShopping && <ShoppingListScreen weekDays={weekDays} slots={slots} recipes={recipes} onClose={() => setShowShopping(false)} />}
     </div>
   )
 }
@@ -881,7 +1112,9 @@ export default function App() {
       )}
 
       {/* Main content */}
-      {activeTab === 'planner' ? (
+      {activeTab === 'refri' ? (
+        <RefriScreen recipes={recipes} />
+      ) : activeTab === 'planner' ? (
         <PlannerScreen recipes={recipes} />
       ) : (
         <>
@@ -896,7 +1129,7 @@ export default function App() {
       {/* Bottom tab bar */}
       {!hideBottomNav && (
         <div style={{ flexShrink: 0, background: C.surface, borderTop: `0.5px solid ${C.border}`, display: 'flex', zIndex: 30 }}>
-          {[{ id: 'recipes', label: 'Recetas', icon: 'book' }, { id: 'planner', label: 'Planificar', icon: 'calendar' }].map(tab => (
+          {[{ id: 'recipes', label: 'Recetas', icon: 'book' }, { id: 'planner', label: 'Planificar', icon: 'calendar' }, { id: 'refri', label: 'Refri', icon: 'fridge' }].map(tab => (
             <button key={tab.id} onClick={() => { setActiveTab(tab.id); if (tab.id === 'recipes' && screen === 'list') {} }} style={{ flex: 1, padding: '10px 0 16px', background: 'none', border: 'none', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
               <Icon name={tab.icon} size={22} color={activeTab === tab.id ? C.green : C.textMuted} />
               <span style={{ fontSize: 10, fontWeight: 600, color: activeTab === tab.id ? C.green : C.textMuted, letterSpacing: '0.04em' }}>{tab.label}</span>
