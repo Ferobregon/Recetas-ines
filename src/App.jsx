@@ -237,26 +237,23 @@ function RecipeForm({initial,onBack,onSave,onSaveLabel='Guardar'}){
     setFlow('ext');setErr('')
     try{
       const b64=await new Promise((resolve,reject)=>{
-        const reader=new FileReader()
-        reader.onload=(e)=>{
-          const img=new Image()
-          img.onload=()=>{
-            try{
-              const canvas=document.createElement('canvas')
-              let w=img.width,h=img.height,MAX=900
-              if(w>h){if(w>MAX){h=Math.round(h*MAX/w);w=MAX}}else{if(h>MAX){w=Math.round(w*MAX/h);h=MAX}}
-              canvas.width=w;canvas.height=h
-              const ctx=canvas.getContext('2d')
-              if(!ctx)throw new Error('Canvas no soportado')
-              ctx.drawImage(img,0,0,w,h)
-              resolve(canvas.toDataURL('image/jpeg',0.65).split(',')[1])
-            }catch(err){reject(err)}
-          }
-          img.onerror=()=>reject(new Error('Error cargando imagen'))
-          img.src=e.target.result
+        const objUrl=URL.createObjectURL(file)
+        const img=new Image()
+        img.onload=()=>{
+          try{
+            const canvas=document.createElement('canvas')
+            let w=img.width,h=img.height,MAX=900
+            if(w>h){if(w>MAX){h=Math.round(h*MAX/w);w=MAX}}else{if(h>MAX){w=Math.round(w*MAX/h);h=MAX}}
+            canvas.width=w;canvas.height=h
+            const ctx=canvas.getContext('2d')
+            if(!ctx)throw new Error('Canvas no soportado')
+            ctx.drawImage(img,0,0,w,h)
+            URL.revokeObjectURL(objUrl)
+            resolve(canvas.toDataURL('image/jpeg',0.65).split(',')[1])
+          }catch(err){URL.revokeObjectURL(objUrl);reject(err)}
         }
-        reader.onerror=()=>reject(new Error('Error leyendo archivo'))
-        reader.readAsDataURL(file)
+        img.onerror=()=>{URL.revokeObjectURL(objUrl);reject(new Error('Error cargando imagen'))}
+        img.src=objUrl
       })
       const res=await fetch('https://bhhrxotdiwdtltyitnyk.supabase.co/functions/v1/extract-recipe',{
         method:'POST',
