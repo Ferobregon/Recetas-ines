@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { uploadPhoto, fetchRecipes, insertRecipe, updateRecipe, deleteRecipe, updateRating, fetchOrCreateWeeklyMenu, fetchMenuSlots, addMenuSlot, removeMenuSlot, fetchRecentMealHistory, fetchPantryItems, addPantryItem, removePantryItem, clearPantryItems } from './supabase.js'
+import { uploadPhoto, fetchRecipes, insertRecipe, updateRecipe, deleteRecipe, updateRating, fetchOrCreateWeeklyMenu, fetchMenuSlots, addMenuSlot, removeMenuSlot, fetchRecentMealHistory, fetchPantryItems, addPantryItem, removePantryItem, clearPantryItems, updateDayServings } from './supabase.js'
 import { useRegisterSW } from 'virtual:pwa-register/react'
 
 const C = { bg: '#F5F0E8', surface: '#FFFDF9', border: '#E8DED0', green: '#4A7C59', greenBg: '#EDF4EF', greenDark: '#2D5238', amber: '#B8763A', amberBg: '#FDF4E8', text: '#2C2416', textSec: '#7A6E5F', textMuted: '#B0A090', danger: '#C0392B' }
@@ -9,6 +9,7 @@ const MTAGS = ['desayuno', 'comida', 'cena', 'botana']
 const CTAGS = ['plato fuerte', 'verdura', 'sopa', 'acompañamiento', 'fruta', 'postre']
 const ATAGS = ['fer', 'inés', 'todos']
 const HTAGS = ['sano', 'balanceado', 'indulgente']
+const UNITS = ['g','kg','ml','l','tsp','tbsp','taza','pza','diente','pizca','rebanada','hoja','porción']
 const MEALS = [{ key: 'desayuno', label: 'Desayuno', icon: '☀️' }, { key: 'comida', label: 'Comida', icon: '🌞' }, { key: 'cena', label: 'Cena', icon: '🌙' }, { key: 'botana', label: 'Botana', icon: '🍎' }]
 const serif = `Georgia,'Palatino Linotype',serif`
 const sans = `-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif`
@@ -194,10 +195,10 @@ function normalizeIngKey(name) {
   return n
 }
 
-function consolidateIngredients(recipes) {
+function consolidateIngredients(ingredientGroups) {
   const map = {}
-  for (const recipe of recipes) {
-    for (const ing of (recipe.ingredients || [])) {
+  for (const ings of ingredientGroups) {
+    for (const ing of ings) {
       const rawName = (ing.n || ing.name || '').trim()
       if (!rawName) continue
       const key = normalizeIngKey(rawName)
@@ -242,8 +243,16 @@ function ShoppingListScreen({ weekDays, slots, recipes, onClose }) {
   const [checked, setChecked] = useState(new Set())
   const weekStart = weekDays[0], weekEnd = weekDays[6]
   const weekLabel = `${fmtDate(weekStart, { day: 'numeric', month: 'short' })} – ${fmtDate(weekEnd, { day: 'numeric', month: 'short' })}`
-  const menuRecipes = [...new Set(slots.map(s => s.recipe_id))].map(id => recipes.find(r => r.id === id)).filter(Boolean)
-  const ingredients = consolidateIngredients(menuRecipes)
+  const scaledIngGroups = slots.map(slot => {
+    const recipe = recipes.find(r => r.id === slot.recipe_id)
+    if (!recipe) return []
+    const scale = (recipe.servings || 2) > 0 ? (slot.servings ?? 2) / (recipe.servings || 2) : 1
+    return (recipe.ingredients || []).map(ing => {
+      const qty = parseQty(ing.q)
+      return { ...ing, q: qty !== null ? String(Math.round(qty * scale * 100) / 100) : ing.q }
+    })
+  }).filter(g => g.length > 0)
+  const ingredients = consolidateIngredients(scaledIngGroups)
   const grouped = {}
   for (const ing of ingredients) { if (!grouped[ing.category]) grouped[ing.category] = []; grouped[ing.category].push(ing) }
   const toggle = key => setChecked(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n })
@@ -649,6 +658,12 @@ function PlannerScreen({ recipes }) {
   const getRecipe = id => recipes.find(r => r.id === id)
   const totalFilled = slots.length
   const hasAny = weekDays.some(d => MEALS.some(m => getDaySlots(d, m.key).length > 0))
+  const dayServings = slots.find(s => s.date === selectedDate)?.servings ?? 2
+  const changeDayServings = async (n) => {
+    if (!currentMenu) return
+    setSlots(prev => prev.map(s => s.date === selectedDate ? { ...s, servings: n } : s))
+    try { await updateDayServings(currentMenu.id, selectedDate, n) } catch (e) { console.error(e) }
+  }
 
   return (
     <div style={{ ...S.screen, position: 'relative' }}>
@@ -700,9 +715,17 @@ function PlannerScreen({ recipes }) {
           </div>
         ) : (
           <>
-            <p style={{ fontSize: 15, fontWeight: 700, color: C.text, fontFamily: serif, marginBottom: 14 }}>
-              {fmtDay(selectedDate)}, {fmtDate(selectedDate, { day: 'numeric', month: 'long' })}
-            </p>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <p style={{ fontSize: 15, fontWeight: 700, color: C.text, fontFamily: serif, margin: 0 }}>
+                {fmtDay(selectedDate)}, {fmtDate(selectedDate, { day: 'numeric', month: 'long' })}
+              </p>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: C.surface, border: `0.5px solid ${C.border}`, borderRadius: 10, padding: '4px 8px' }}>
+                <span style={{ fontSize: 12 }}>👥</span>
+                <button onClick={() => changeDayServings(Math.max(1, dayServings - 1))} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 17, color: C.textSec, lineHeight: 1, padding: '0 2px' }}>−</button>
+                <span style={{ fontSize: 14, fontWeight: 700, color: C.text, minWidth: 16, textAlign: 'center' }}>{dayServings}</span>
+                <button onClick={() => changeDayServings(dayServings + 1)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 17, color: C.textSec, lineHeight: 1, padding: '0 2px' }}>+</button>
+              </div>
+            </div>
             {MEALS.map(({ key: mealType, label, icon }) => {
               const daySlots = getDaySlots(selectedDate, mealType)
               const mc = MT[mealType] || { bg: C.greenBg, tx: C.greenDark, ac: C.green }
@@ -1102,7 +1125,10 @@ function RecipeForm({ initial, onBack, onSave, onSaveLabel = 'Guardar' }) {
             <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 8, alignItems: 'center' }}>
               <input style={{ ...S.input, flex: 2 }} type="text" value={g.n} onChange={e => updI(i, 'n', e.target.value)} placeholder="Ingrediente" />
               <input style={{ ...S.input, width: 52 }} type="text" value={g.q} onChange={e => updI(i, 'q', e.target.value)} placeholder="Cant." />
-              <input style={{ ...S.input, flex: 1 }} type="text" value={g.u} onChange={e => updI(i, 'u', e.target.value)} placeholder="Unid." />
+              <select style={{ ...S.input, flex: 1, cursor: 'pointer', WebkitAppearance: 'none', appearance: 'none', paddingRight: 6 }} value={g.u || ''} onChange={e => updI(i, 'u', e.target.value)}>
+                <option value="">-</option>
+                {UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+              </select>
               {f.ingredients.length > 1 && <button onClick={() => delI(i)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.danger, padding: 4, flexShrink: 0 }}><Icon name="x" size={16} color={C.danger} /></button>}
             </div>
           ))}
